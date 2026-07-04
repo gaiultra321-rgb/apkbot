@@ -1,0 +1,11 @@
+name = "apkbot-worker"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# D1 database binding.
+# 1) Cloudflare Dashboard -> Workers & Pages -> D1 -> Create database (নাম দাও: apkbot-db)
+# 2) ওখান থেকে "database_id" কপি করে নিচে বসাও
+[[d1_databases]]
+binding = "DB"
+database_name = "apkbot-db"
+database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"

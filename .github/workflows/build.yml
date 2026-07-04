@@ -1,0 +1,257 @@
+name: Universal App Builder (Web + Kotlin/Java)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        required: true
+      build_type:
+        required: true
+      app_name:
+        required: true
+      splash_mode:
+        required: true
+      permissions:
+        required: false
+
+permissions: write-all
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Check Project Type
+        id: check_type
+        run: |
+          rm -rf NativeApp MyApp
+          mkdir TempCheck
+          PROJECT_TYPE="unknown"
+
+          if [ -f "project_source.txt" ] || [ -f "uploaded_source.html" ]; then
+             PROJECT_TYPE="web"
+             echo "Detected URL/HTML Project"
+          elif [ -f "uploaded_source.zip" ]; then
+             unzip -q uploaded_source.zip -d TempCheck
+             
+             if find TempCheck -name "build.gradle" -o -name "build.gradle.kts" | grep -q .; then
+                PROJECT_TYPE="native"
+                echo "Detected Native Kotlin/Java Project"
+                mv TempCheck NativeApp
+             elif find TempCheck -name "index.html" | grep -q .; then
+                PROJECT_TYPE="web"
+                echo "Detected HTML/Cordova Project inside ZIP"
+             else
+                echo "ERROR: Invalid ZIP! No build.gradle (Java/Kotlin) or index.html (Web) found." > error_log.txt
+                exit 1 
+             fi
+          fi
+          
+          echo "PROJECT_TYPE=$PROJECT_TYPE" >> $GITHUB_ENV
+
+      # ========================================================
+      # SUPER FAST CACHING SYSTEM (NEW)
+      # ========================================================
+      - name: Cache Gradle Packages (Native)
+        if: env.PROJECT_TYPE == 'native'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('NativeApp/**/*.gradle*', 'NativeApp/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache NPM & Cordova (Web)
+        if: env.PROJECT_TYPE == 'web'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-cordova
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      # ========================================================
+      # OPTION A: NATIVE KOTLIN/JAVA BUILD
+      # ========================================================
+      - name: Setup Default Gradle
+        if: env.PROJECT_TYPE == 'native'
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.2
+
+      - name: Build Native App
+        if: env.PROJECT_TYPE == 'native'
+        run: |
+          cd NativeApp
+          ROOT_DIR=$(dirname $(find . -name "build.gradle" -o -name "build.gradle.kts" | head -n 1))
+          cd "$ROOT_DIR"
+          
+          set -o pipefail
+          if [ -f "gradlew" ] || [ -f "./gradlew" ]; then
+             chmod +x gradlew
+             ./gradlew assembleDebug --stacktrace --warning-mode all 2>&1 | tee ../../build_log.txt
+          else
+             gradle assembleDebug --stacktrace --warning-mode all 2>&1 | tee ../../build_log.txt
+          fi
+          
+          mkdir -p ../../OUTPUT
+          APK_FOUND=$(find . -name "*-debug.apk" | head -n 1)
+          if [ ! -z "$APK_FOUND" ]; then
+             cp "$APK_FOUND" ../../OUTPUT/app-debug.apk
+          else
+             echo "Build Completed but APK file not found!" >> ../../build_log.txt
+             exit 1
+          fi
+
+      # ========================================================
+      # OPTION B: CORDOVA WEB BUILD
+      # ========================================================
+      - name: Setup Node & Cordova
+        if: env.PROJECT_TYPE == 'web'
+        run: npm install -g cordova
+
+      - name: Create & Configure Cordova App
+        if: env.PROJECT_TYPE == 'web'
+        run: |
+          UNIQUE_ID="com.bot.app$(date +%s)"
+          cordova create MyApp $UNIQUE_ID "${{ github.event.inputs.app_name }}"
+          cd MyApp
+          cordova platform add android
+
+          if [ -f "../app_icon.png" ]; then
+            cp ../app_icon.png www/icon.png
+            sed -i '/<widget/a \    <icon src="www/icon.png" />' config.xml
+            cp ../app_icon.png www/splash.png 
+          fi
+          
+          MODE="${{ github.event.inputs.splash_mode }}"
+          cordova plugin add cordova-plugin-splashscreen || true
+          
+          sed -i '/<widget/a \    <preference name="SplashScreenDelay" value="3000" />' config.xml
+          sed -i '/<widget/a \    <preference name="ShowSplashScreenSpinner" value="false" />' config.xml
+          sed -i '/<widget/a \    <preference name="AndroidWindowSplashScreenAnimatedIcon" value="www/splash.png" />' config.xml
+          
+          if [ "$MODE" == "blank" ]; then
+             pip install Pillow
+             python3 -c "from PIL import Image; img = Image.new('RGB', (1280, 720), 'white'); img.save('www/splash.png')"
+          elif [ "$MODE" == "custom" ] && [ -f "../splash_screen.png" ]; then
+             cp ../splash_screen.png www/splash.png
+          fi
+          sed -i '/<platform name="android">/a \        <splash src="www/splash.png" />' config.xml
+
+          PERMS="${{ github.event.inputs.permissions }}"
+          if [[ "$PERMS" == *"camera"* ]]; then cordova plugin add cordova-plugin-camera; fi
+          if [[ "$PERMS" == *"geolocation"* ]]; then cordova plugin add cordova-plugin-geolocation; fi
+          if [[ "$PERMS" == *"media"* ]]; then cordova plugin add cordova-plugin-media-capture; fi
+          if [[ "$PERMS" == *"contacts"* ]]; then cordova plugin add cordova-plugin-contacts; fi
+          if [[ "$PERMS" == *"storage"* ]]; then cordova plugin add cordova-plugin-file; fi
+          if [[ "$PERMS" == *"vibrate"* ]]; then cordova plugin add cordova-plugin-vibration; fi
+          if [[ "$PERMS" == *"call"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.CALL_PHONE" /></config-file>' config.xml; fi
+          if [[ "$PERMS" == *"bluetooth"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.BLUETOOTH" /></config-file>' config.xml; fi
+          if [[ "$PERMS" == *"internet"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.INTERNET" /></config-file>' config.xml; fi
+          if [[ "$PERMS" == *"sms"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.READ_SMS" /></config-file>' config.xml; fi
+          if [[ "$PERMS" == *"notification"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.POST_NOTIFICATIONS" /></config-file>' config.xml; fi
+          if [[ "$PERMS" == *"record_audio"* ]]; then sed -i '/<platform name="android">/a \        <config-file target="AndroidManifest.xml" parent="/*"><uses-permission android:name="android.permission.RECORD_AUDIO" /></config-file>' config.xml; fi
+
+          TYPE="${{ github.event.inputs.build_type }}"
+          if [ "$TYPE" == "url" ]; then
+             URL=$(cat ../project_source.txt)
+             sed -i "s|<content src=\"index.html\" />|<content src=\"$URL\" />|g" config.xml
+             sed -i '/<access origin="\*" \/>/a <allow-navigation href="*" />' config.xml
+          elif [ "$TYPE" == "html" ]; then
+             cp ../uploaded_source.html www/index.html
+          elif [ "$TYPE" == "zip" ]; then
+             unzip -o ../uploaded_source.zip -d www/
+          fi
+
+          if ! cordova build android --debug > ../build_log.txt 2>&1; then
+             echo "Cordova Build Failed"
+             exit 1
+          fi
+          
+          mkdir -p ../OUTPUT
+          cp platforms/android/app/build/outputs/apk/debug/app-debug.apk ../OUTPUT/app-debug.apk
+
+      # ========================================================
+      # SAVE BACKUP TO ARTIFACTS
+      # ========================================================
+      - name: Upload APK to Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}-APK
+          path: OUTPUT/app-debug.apk
+          retention-days: 90
+
+      # ========================================================
+      # SEND APK
+      # ========================================================
+      - name: Deliver APK
+        if: success()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          APP_NAME: ${{ github.event.inputs.app_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK_PATH="OUTPUT/app-debug.apk"
+          if [ ! -f "$APK_PATH" ]; then exit 1; fi
+          
+          CLEAN_APP_NAME="${APP_NAME// /_}"
+          FINAL_NAME="${CLEAN_APP_NAME}.apk"
+          mv "$APK_PATH" "$FINAL_NAME"
+
+          FILE_SIZE=$(du -m "$FINAL_NAME" | cut -f1)
+          if [ "$FILE_SIZE" -lt 50 ]; then
+             curl -F "chat_id=$CHAT_ID" -F "document=@$FINAL_NAME" -F "caption=App Ready! ($FILE_SIZE MB)" "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
+          else
+             TAG_NAME="build-$(date +%s)"
+             gh release create "$TAG_NAME" "$FINAL_NAME" --title "App: $APP_NAME" --notes "Built via Bot"
+             REPO="${{ github.repository }}"
+             LINK="https://github.com/$REPO/releases/download/$TAG_NAME/$FINAL_NAME"
+             MSG="App Ready ($FILE_SIZE MB).%0ADownload Link: $LINK"
+             curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" -d "chat_id=$CHAT_ID" -d "text=$MSG"
+          fi
+
+      # ========================================================
+      # ALWAYS SEND LOG FILE
+      # ========================================================
+      - name: Send Build Log
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+        run: |
+          if [ -f "NativeApp/build_log.txt" ]; then LOG_FILE="NativeApp/build_log.txt";
+          elif [ -f "build_log.txt" ]; then LOG_FILE="build_log.txt";
+          elif [ -f "error_log.txt" ]; then LOG_FILE="error_log.txt";
+          else
+             echo "Build processing completed/failed before logging started." > fallback_log.txt
+             LOG_FILE="fallback_log.txt"
+          fi
+          
+          curl -F "chat_id=$CHAT_ID" \
+               -F "document=@$LOG_FILE" \
+               -F "caption=Here is your complete Build Log (Success/Failure)." \
+               "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git rm --ignore-unmatch project_source.txt uploaded_source.html uploaded_source.zip app_icon.png splash_screen.png
+          git commit -m "Cleanup" || echo "Clean"
+          git push
+          

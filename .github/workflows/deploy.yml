@@ -1,0 +1,52 @@
+name: Deploy Worker to Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # WEBHOOK_SECRET কোনো GitHub Secret হিসেবে বসাতে হবে না — প্রতি ডিপ্লয়ে
+      # এখানেই একটা নতুন র‍্যান্ডম ভ্যালু বানিয়ে সাথে সাথে Worker + Telegram
+      # দুই জায়গায়ই সিঙ্ক করে দেওয়া হয়, তাই সবসময় মিলে যায়।
+      - name: Generate webhook secret
+        id: gen
+        run: echo "value=$(openssl rand -hex 24)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Worker + sync secrets
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: deploy
+          secrets: |
+            BOT_TOKEN
+            GH_TOKEN
+            REPO_NAME
+            WEBHOOK_SECRET
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ github.repository }}
+          WEBHOOK_SECRET: ${{ steps.gen.outputs.value }}
+
+      - name: Auto-register Telegram webhook
+        run: |
+          URL=$(echo "${{ steps.deploy.outputs.command-output }}" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -n1)
+          if [ -z "$URL" ]; then
+            echo "Worker URL খুঁজে পাওয়া যায়নি, ম্যানুয়ালি /setwebhook ভিজিট করো।"
+            exit 0
+          fi
+          echo "Setting webhook at: $URL/setwebhook"
+          curl -s "$URL/setwebhook"

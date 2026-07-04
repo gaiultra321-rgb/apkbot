@@ -1,0 +1,14 @@
+{
+  "name": "apkbot-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram APK builder bot running on Cloudflare Workers + D1",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 execute apkbot-db --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
