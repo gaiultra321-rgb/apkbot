@@ -8,4 +8,4 @@ compatibility_date = "2026-07-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "apkbot-db"
-database_id = "PASTE_YOUR_D1_DATABASE_ID_HERE"
+database_id = "508b560e-e1e9-4138-af47-116012c53d97"
